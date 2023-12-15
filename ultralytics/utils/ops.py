@@ -177,6 +177,7 @@ def non_max_suppression(
     assert 0 <= conf_thres <= 1, f'Invalid Confidence threshold {conf_thres}, valid values are between 0.0 and 1.0'
     assert 0 <= iou_thres <= 1, f'Invalid IoU {iou_thres}, valid values are between 0.0 and 1.0'
     if isinstance(prediction, (list, tuple)):  # YOLOv8 model in validation model, output = (inference_out, loss_out)
+        feats = prediction[1]  # Detected bbox features Add
         prediction = prediction[0]  # select only inference output
 
     device = prediction.device
@@ -191,7 +192,7 @@ def non_max_suppression(
 
     # Settings
     # min_wh = 2  # (pixels) minimum box width and height
-    time_limit = 0.5 + max_time_img * bs  # seconds to quit after
+    time_limit = 0.5 + max_time_img * bs  # seconds to quit after 0.5
     multi_label &= nc > 1  # multiple labels per box (adds 0.5ms/img)
 
     prediction = prediction.transpose(-1, -2)  # shape(1,84,6300) to shape(1,6300,84)
@@ -199,6 +200,7 @@ def non_max_suppression(
 
     t = time.time()
     output = [torch.zeros((0, 6 + nm), device=prediction.device)] * bs
+    output_bbox_feats = list()  # Detected bbox features holder
     for xi, x in enumerate(prediction):  # image index, image inference
         # Apply constraints
         # x[((x[:, 2:4] < min_wh) | (x[:, 2:4] > max_wh)).any(1), 4] = 0  # width-height
@@ -218,6 +220,14 @@ def non_max_suppression(
 
         # Detections matrix nx6 (xyxy, conf, cls)
         box, cls, mask = x.split((4, nc, nm), 1)
+
+        # Detected bbox features Add-S
+        xfeat = [feats[i][xi, ...].unsqueeze(dim=0) for i in range(len(feats))]  # Detected bbox there detection heads
+        x_cat = torch.cat([xi.view(xfeat[0].shape[0], nc + 16 * 4, -1) for xi in xfeat], 2)
+        box_feats, cls_feats = x_cat.split((16 * 4, nc), 1)
+        box_feats = box_feats.transpose(-1, -2).squeeze(0)
+        box_feats = box_feats[xc[xi]]
+        # Detected bbox features Add-E
 
         if multi_label:
             i, j = torch.where(cls > conf_thres)
@@ -256,13 +266,16 @@ def non_max_suppression(
         #         i = i[iou.sum(1) > 1]  # require redundancy
 
         output[xi] = x[i]
+        box_feats = box_feats[i]  # pick the bbox feature after nmx confidence
+        print(f'box_feats.shape:{box_feats.shape}')
+        output_bbox_feats.append(box_feats)
         if mps:
             output[xi] = output[xi].to(device)
         if (time.time() - t) > time_limit:
             LOGGER.warning(f'WARNING ⚠️ NMS time limit {time_limit:.3f}s exceeded')
             break  # time limit exceeded
 
-    return output
+    return output, output_bbox_feats
 
 
 def clip_boxes(boxes, shape):
